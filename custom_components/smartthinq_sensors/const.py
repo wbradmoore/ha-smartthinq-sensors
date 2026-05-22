@@ -38,6 +38,15 @@ CONF_USE_API_V2 = "use_api_v2"
 CONF_USE_HA_SESSION = "use_ha_session"
 CONF_USE_REDIRECT = "use_redirect"
 
+# Polling interval (seconds) - user-adjustable via OptionsFlow / number entity.
+# LG cloud blocks accounts that poll too aggressively. Default raised from
+# the original hardcoded 30 s to 300 s (5 min) so fresh installs and existing
+# users without an explicit override avoid the ban.
+CONF_SCAN_INTERVAL = "scan_interval"
+DEFAULT_SCAN_INTERVAL = 300
+MIN_SCAN_INTERVAL = 30
+MAX_SCAN_INTERVAL = 3600
+
 CLIENT = "client"
 LGE_DEVICES = "lge_devices"
 
