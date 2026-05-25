@@ -49,9 +49,7 @@ class SmartThinQScanIntervalNumber(NumberEntity):
         async def _options_changed(_hass: HomeAssistant, _entry: ConfigEntry) -> None:
             self.async_write_ha_state()
 
-        self.async_on_remove(
-            self._config_entry.add_update_listener(_options_changed)
-        )
+        self.async_on_remove(self._config_entry.add_update_listener(_options_changed))
 
     @property
     def native_value(self) -> float:

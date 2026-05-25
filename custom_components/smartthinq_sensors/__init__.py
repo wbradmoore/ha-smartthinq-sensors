@@ -378,12 +378,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # If LG never connected, only the number platform was forwarded; trying to
     # unload the LG-dependent platforms in that case errors out per-platform.
     lg_loaded = CLIENT in hass.data.get(DOMAIN, {})
-    platforms = (
-        SMARTTHINQ_PLATFORMS if lg_loaded else [Platform.NUMBER]
-    )
-    if unload_ok := await hass.config_entries.async_unload_platforms(
-        entry, platforms
-    ):
+    platforms = SMARTTHINQ_PLATFORMS if lg_loaded else [Platform.NUMBER]
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, platforms):
         data = hass.data.pop(DOMAIN)
         reload = data.get(SIGNAL_RELOAD_ENTRY, 0)
         if reload > 0:
