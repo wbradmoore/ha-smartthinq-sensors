@@ -85,6 +85,7 @@ SIGNAL_RELOAD_ENTRY = f"{DOMAIN}_reload_entry"
 
 DISCOVERED_DEVICES = "discovered_devices"
 UNSUPPORTED_DEVICES = "unsupported_devices"
+SHARED_COORDINATOR = "shared_coordinator"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -343,6 +344,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DISCOVERED_DEVICES: discovered_devices,
         }
     )
+
+    # One shared coordinator for the whole client. All LGEDevices subscribe to
+    # it, so each tick is exactly one refresh_devices() call (regardless of how
+    # many devices the account has). Replaces N-per-device coordinators.
+    await _async_create_shared_coordinator(hass, client)
+
     await hass.config_entries.async_forward_entry_setups(
         entry, [p for p in SMARTTHINQ_PLATFORMS if p is not Platform.NUMBER]
     )
@@ -352,24 +359,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _async_create_shared_coordinator(
+    hass: HomeAssistant, client: ClientAsync
+) -> DataUpdateCoordinator:
+    """Build a single coordinator that drives every LGEDevice off one refresh."""
+    interval = hass.data[DOMAIN].get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+
+    async def _async_update_all():
+        """One refresh_devices(); on success, walk every device and refresh state."""
+        try:
+            await client.refresh_devices()
+        except Exception as exc:  # pylint: disable=broad-except
+            # On a failed refresh, skip the per-device walk: they'd each
+            # re-trigger refresh_devices and compound the failure.
+            _LOGGER.warning("ThinQ refresh_devices failed: %s", exc)
+            return None
+        for type_devices in hass.data.get(DOMAIN, {}).get(LGE_DEVICES, {}).values():
+            for lge_device in type_devices:
+                # Each device's poll() re-enters refresh_devices(); the 25s
+                # dedupe in core_async short-circuits it back to a cache read.
+                await lge_device._async_state_update()  # noqa: SLF001
+        return None
+
+    coordinator: DataUpdateCoordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=f"{DOMAIN}-shared",
+        update_method=_async_update_all,
+        update_interval=timedelta(seconds=interval),
+    )
+
+    # Bind each existing LGEDevice to the shared coordinator (CoordinatorEntity-
+    # based entities pull this via lge_device.coordinator).
+    for type_devices in hass.data[DOMAIN].get(LGE_DEVICES, {}).values():
+        for lge_device in type_devices:
+            lge_device._coordinator = coordinator  # noqa: SLF001
+
+    hass.data[DOMAIN][SHARED_COORDINATOR] = coordinator
+    await coordinator.async_refresh()
+    return coordinator
+
+
 async def _options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply OptionsFlow changes to running coordinators without a reload."""
+    """Apply OptionsFlow changes to the shared coordinator without a reload."""
     new_interval = int(entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     domain_data = hass.data.get(DOMAIN, {})
     if domain_data.get(CONF_SCAN_INTERVAL) == new_interval:
         return
     domain_data[CONF_SCAN_INTERVAL] = new_interval
-    delta = timedelta(seconds=new_interval)
-    for devices in domain_data.get(LGE_DEVICES, {}).values():
-        for lge_device in devices:
-            if lge_device.coordinator is not None:
-                lge_device.coordinator.update_interval = delta
-                # Reschedule so the new interval takes effect immediately
-                # rather than waiting out the old one.
-                if lge_device.coordinator.data is not None:
-                    lge_device.coordinator.async_set_updated_data(
-                        lge_device.coordinator.data
-                    )
+    if (coord := domain_data.get(SHARED_COORDINATOR)) is not None:
+        coord.update_interval = timedelta(seconds=new_interval)
+        # Reschedule so the new interval takes effect immediately rather than
+        # waiting out the old one.
+        coord.async_set_updated_data(coord.data)
     _LOGGER.info("ThinQ scan interval updated to %d seconds", new_interval)
 
 
@@ -491,8 +533,8 @@ class LGEDevice:
         self._state = self._device.status
         self._model = f"{self._model}-{self._device.model_info.model_type}"
 
-        # Create status update coordinator
-        await self._create_coordinator()
+        # Coordinator is created at the client level (one shared across all devices)
+        # after lge_devices_setup completes. See _async_create_shared_coordinator.
 
         # Initialize device features
         _ = self._state.device_features
@@ -504,27 +546,6 @@ class LGEDevice:
         """Manually update state and notify coordinator entities."""
         if self._coordinator:
             self._coordinator.async_set_updated_data(self._state)
-
-    async def _create_coordinator(self) -> None:
-        """Get the coordinator for a specific device."""
-        interval = self._hass.data.get(DOMAIN, {}).get(
-            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
-        )
-        coordinator: DataUpdateCoordinator = DataUpdateCoordinator(
-            self._hass,
-            _LOGGER,
-            name=f"{DOMAIN}-{self._name}",
-            update_method=self._async_update,
-            # Polling interval. Will only be polled if there are subscribers.
-            update_interval=timedelta(seconds=interval),
-        )
-        await coordinator.async_refresh()
-        self._coordinator = coordinator
-
-    async def _async_update(self):
-        """Async update used by coordinator."""
-        await self._async_state_update()
-        return self._state
 
     async def _async_state_update(self):
         """Update device state."""
