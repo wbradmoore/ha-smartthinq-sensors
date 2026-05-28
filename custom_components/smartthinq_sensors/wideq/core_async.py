@@ -427,10 +427,10 @@ class CoreAsync:
                         # this are messages "Please consider using the official API" or "consider using native API"
                         # we refresh the client_id as work-around
                         _LOGGER.info(
-                            "Refreshing client ID after receiving msg 9006 or 9012: %s",
+                            "Received msg 9006 or 9012 (client_id rotation disabled locally): %s",
                             result,
                         )
-                        self._get_client_id(user_number, True)
+                        # self._get_client_id(user_number, True)
                     message = result.get("result") or "ThinQ APIv2 error"
                     if code in API2_ERRORS:
                         raise API2_ERRORS[code](message)
