@@ -60,6 +60,7 @@ from .wideq.core_exceptions import (
     MonitorRefreshError,
     MonitorUnavailableError,
     NotConnectedError,
+    UseOfficialAPIError,
 )
 from .wideq.device import Device as ThinQDevice
 
@@ -86,6 +87,10 @@ SIGNAL_RELOAD_ENTRY = f"{DOMAIN}_reload_entry"
 DISCOVERED_DEVICES = "discovered_devices"
 UNSUPPORTED_DEVICES = "unsupported_devices"
 SHARED_COORDINATOR = "shared_coordinator"
+# On a 9006/9012 the client_id auto-rotates before the error is raised, so a
+# shared refresh retries in-cycle to pick up the fresh identity. 3 attempts
+# mirrors what the per-device design got for free from sibling device polls.
+MAX_REFRESH_ATTEMPTS = 3
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -367,13 +372,30 @@ async def _async_create_shared_coordinator(
 
     async def _async_update_all():
         """One refresh_devices(); on success, walk every device and refresh state."""
-        try:
-            await client.refresh_devices()
-        except Exception as exc:  # pylint: disable=broad-except
-            # On a failed refresh, skip the per-device walk: they'd each
-            # re-trigger refresh_devices and compound the failure.
-            _LOGGER.warning("ThinQ refresh_devices failed: %s", exc)
-            return None
+        for attempt in range(1, MAX_REFRESH_ATTEMPTS + 1):
+            try:
+                await client.refresh_devices()
+                break
+            except UseOfficialAPIError as exc:
+                # 9006/9012: core_async already rotated the client_id before
+                # raising. Retry in-cycle so we use the fresh identity now
+                # rather than failing until the next poll.
+                if attempt >= MAX_REFRESH_ATTEMPTS:
+                    _LOGGER.warning(
+                        "ThinQ refresh_devices failed after %d client_id rotations: %s",
+                        attempt,
+                        exc,
+                    )
+                    return None
+                _LOGGER.info(
+                    "ThinQ 9006/9012 on attempt %d; client_id rotated, retrying",
+                    attempt,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                # Any other failure: skip the per-device walk so devices don't
+                # each re-trigger refresh_devices and compound the failure.
+                _LOGGER.warning("ThinQ refresh_devices failed: %s", exc)
+                return None
         for type_devices in hass.data.get(DOMAIN, {}).get(LGE_DEVICES, {}).values():
             for lge_device in type_devices:
                 # Each device's poll() re-enters refresh_devices(); the 25s
