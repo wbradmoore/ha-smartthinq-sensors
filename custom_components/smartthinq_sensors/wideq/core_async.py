@@ -199,9 +199,6 @@ class CoreAsync:
         self._client_id = client_id
         self._update_clientid_callback = update_clientid_callback
         self._lang_pack_url = None
-        # locally-patched: once we've had any 0000 response, freeze the client_id
-        # to test whether persistent identity (no rotation) avoids LG 9006 flagging
-        self._first_success = False
 
         if session:
             self._session = session
@@ -425,27 +422,15 @@ class CoreAsync:
         if is_api_v2:
             if "resultCode" in result:
                 code = result["resultCode"]
-                if code == "0000":
-                    if not self._first_success:
-                        _LOGGER.info(
-                            "First successful ThinQ response; freezing client_id (rotation now disabled)"
-                        )
-                        self._first_success = True
                 if code != "0000":
                     if code in ("9006", "9012"):
                         # this are messages "Please consider using the official API" or "consider using native API"
                         # we refresh the client_id as work-around
-                        if self._first_success:
-                            _LOGGER.info(
-                                "Received msg 9006 or 9012 (post-setup, rotation suppressed): %s",
-                                result,
-                            )
-                        else:
-                            _LOGGER.info(
-                                "Received msg 9006 or 9012 (pre-setup, rotating client_id): %s",
-                                result,
-                            )
-                            self._get_client_id(user_number, True)
+                        _LOGGER.info(
+                            "Refreshing client ID after receiving msg 9006 or 9012: %s",
+                            result,
+                        )
+                        self._get_client_id(user_number, True)
                     message = result.get("result") or "ThinQ APIv2 error"
                     if code in API2_ERRORS:
                         raise API2_ERRORS[code](message)
