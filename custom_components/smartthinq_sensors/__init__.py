@@ -265,34 +265,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # if network is not connected we can have some error
     # raising ConfigEntryNotReady platform setup will be retried
     lge_auth = LGEAuthentication(hass, region, language, use_ha_session)
-    try:
-        client = await lge_auth.create_client_from_token(
-            refresh_token, oauth2_url, client_id, _update_clientid_callback
-        )
-    except (AuthenticationError, InvalidCredentialError) as exc:
-        if (auth_retry := hass.data[DOMAIN].get(AUTH_RETRY, 0)) >= MAX_AUTH_RETRY:
-            hass.data.pop(DOMAIN)
-            # Launch config entries reauth setup
-            raise ConfigEntryAuthFailed("ThinQ authentication failed") from exc
-
-        hass.data[DOMAIN][AUTH_RETRY] = auth_retry + 1
-        msg = (
-            "Invalid ThinQ credential error, integration setup aborted."
-            " Please use the LG App on your mobile device to ensure your"
-            " credentials are correct or there are new Term of Service to accept"
-        )
-        if log_info:
-            _LOGGER.warning(msg, exc_info=True)
-        raise ConfigEntryNotReady(msg) from exc
-
-    except Exception as exc:  # pylint: disable=broad-except
-        if log_info:
-            _LOGGER.warning(
-                "Connection not available. ThinQ platform not ready", exc_info=exc
+    client = None
+    for attempt in range(1, MAX_REFRESH_ATTEMPTS + 1):
+        try:
+            client = await lge_auth.create_client_from_token(
+                refresh_token, oauth2_url, client_id, _update_clientid_callback
             )
-        # Keep the entry loaded so the number entity is usable and the user
-        # can adjust scan_interval; reload the entry once LG is reachable.
-        return True
+            break
+        except (AuthenticationError, InvalidCredentialError) as exc:
+            if (auth_retry := hass.data[DOMAIN].get(AUTH_RETRY, 0)) >= MAX_AUTH_RETRY:
+                hass.data.pop(DOMAIN)
+                # Launch config entries reauth setup
+                raise ConfigEntryAuthFailed("ThinQ authentication failed") from exc
+
+            hass.data[DOMAIN][AUTH_RETRY] = auth_retry + 1
+            msg = (
+                "Invalid ThinQ credential error, integration setup aborted."
+                " Please use the LG App on your mobile device to ensure your"
+                " credentials are correct or there are new Term of Service to accept"
+            )
+            if log_info:
+                _LOGGER.warning(msg, exc_info=True)
+            raise ConfigEntryNotReady(msg) from exc
+
+        except UseOfficialAPIError as exc:
+            # 9006/9012 during initial client setup: core_async already rotated
+            # the client_id (and persisted it via _update_clientid_callback)
+            # before raising. Retry in-cycle with the fresh identity so a startup
+            # nag doesn't leave the integration dead until the next restart.
+            if attempt >= MAX_REFRESH_ATTEMPTS:
+                if log_info:
+                    _LOGGER.warning(
+                        "ThinQ client setup failed after %d client_id rotations: %s",
+                        attempt,
+                        exc,
+                    )
+                # Keep the entry loaded so the number entity stays usable.
+                return True
+            _LOGGER.info(
+                "ThinQ 9006/9012 during setup on attempt %d; client_id rotated,"
+                " retrying",
+                attempt,
+            )
+            # Pick up the rotated client_id the callback just wrote to the entry.
+            client_id = entry.data.get(CONF_CLIENT_ID)
+
+        except Exception as exc:  # pylint: disable=broad-except
+            if log_info:
+                _LOGGER.warning(
+                    "Connection not available. ThinQ platform not ready", exc_info=exc
+                )
+            # Keep the entry loaded so the number entity is usable and the user
+            # can adjust scan_interval; reload the entry once LG is reachable.
+            return True
 
     if not client.has_devices:
         _LOGGER.error("No ThinQ devices found. Component setup aborted")
